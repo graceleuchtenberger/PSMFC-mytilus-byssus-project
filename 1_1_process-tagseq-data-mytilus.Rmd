@@ -1,0 +1,371 @@
+---
+title: "Process tagseq data - PSMFC mytilus byssus samples"
+output: html_notebook
+---
+
+
+```{bash, engine.opts='-l'}
+echo $PATH
+```
+
+# Download tag-seq data
+```{bash}
+mkdir raw-data/
+cd raw-data/
+
+wget -r \
+--no-directories --no-parent \
+-P . \
+-A .fastq.gz https://gannet.fish.washington.edu/panopea/PSMFC-mytilus-byssus-pilot/20220405-tagseq/ \
+--no-check-certificate
+
+```
+
+# unzip .fastq.gz files
+```{bash}
+cd raw-data/
+gunzip *.fastq.gz
+
+```
+
+# Run fastqc on untrimmed files
+```{bash}
+mkdir fastqc/
+mkdir fastqc/untrimmed/
+
+/home/shared/FastQC/fastqc \
+/home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/raw-data/*.fastq \
+--outdir /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/fastqc/untrimmed/ \
+--quiet
+
+```
+
+# Run multiqc
+```{bash}
+
+eval "$(/opt/anaconda/anaconda3/bin/conda shell.bash hook)"
+conda activate
+
+cd fastqc/untrimmed/
+
+multiqc .
+
+```
+
+# trim adapter sequences
+```{bash}
+mkdir trim-fastq/
+cd raw-data
+
+for F in *.fastq
+do
+#strip .fastq and directory structure from each file, then
+# add suffix .trim to create output name for each file
+results_file="$(basename -a $F)"
+
+# run cutadapt on each file
+/home/shared/8TB_HDD_02/mattgeorgephd/.local/bin/cutadapt $F -a A{8} -a G{8} -a AGATCGG -u 15 -m 20 -o \
+/home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/trim-fastq/$results_file
+done
+
+```
+
+```{bash}
+
+# Before trimming
+! wc -l /home/shared/8TB_HDD_02/mattgeorgephd/PSMFC-mytilus-byssus-pilot/merged-fastq/*.fastq
+
+# After trimming
+! wc -l /home/shared/8TB_HDD_02/mattgeorgephd/PSMFC-mytilus-byssus-pilot/trim-fastq/*.fastq
+
+```
+
+```{r}
+# Reads remaining after trimming and filtering (%)
+1472899016/1582147952*100
+```
+
+
+# Run fastqc on trimmed files
+```{bash}
+mkdir fastqc/
+mkdir fastqc/trimmed/
+
+/home/shared/FastQC/fastqc \
+/home/shared/8TB_HDD_02/mattgeorgephd/PSMFC-mytilus-byssus-pilot/merged-fastq/*.fastq \
+--outdir /home/shared/8TB_HDD_02/mattgeorgephd/PSMFC-mytilus-byssus-pilot/fastqc/trimmed/ \
+--quiet
+
+```
+
+# Run multiqc on trimmed files
+```{bash}
+
+eval "$(/opt/anaconda/anaconda3/bin/conda shell.bash hook)"
+conda activate
+
+cd fastqc/trimmed/
+
+multiqc .
+
+```
+
+# Interleave sequences
+```{bash}
+
+cd /home/shared/8TB_HDD_02/mattgeorgephd/PSMFC-mytilus-byssus-pilot/trim-fastq/
+
+for filename in *_R1_*.fastq
+do
+# first, make the base by removing .extract.fastq.gz
+  base=$(basename $filename .fastq)
+  echo $base
+
+# now, construct the R2 filename by replacing R1 with R2
+baseR2=${base/_R1/_R2}
+echo $baseR2
+
+# construct the output filename
+  output=${base/_R1/}.pe.fastq
+
+  (interleave-reads.py ${base}.fastq ${baseR2}.fastq | \
+  gzip > $output)
+done
+
+```
+
+
+# concatenate fastq files by lane
+```{bash}
+mkdir merged-fastq
+cd trim-fastq/
+
+printf '%s\n' *.fastq | sed 's/^\([^_]*_[^_]*\).*/\1/' | uniq |
+while read prefix; do
+    cat "$prefix"*R1*.fastq >"${prefix}_R1.fastq"
+    # cat "$prefix"*R2*.fastq >"${prefix}_R2.fastq" # include if more than one run
+done
+
+# I moved files to merged-fastq
+```
+
+```{bash}
+mkdir data
+cd data/
+curl -O https://owl.fish.washington.edu/halfshell/genomic-databank/Mtros-hq_transcripts.fasta
+
+
+```
+
+# Create indices for transcriptome with Kallisto
+```{bash}
+#Took 15 minutes on Raven
+mkdir kall-index
+cd kall-index/
+# Build index
+/home/shared/kallisto/kallisto \
+  index -i \
+  /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-index/kall-index-tross.index \
+  /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/data/Mtros-hq_transcripts.fasta
+  
+#target de Bruijn graph has 9415699 contigs and contains 226292820 k-mers 
+```
+
+# Quantify indices with Kallisto
+```{bash}
+#make output folder for quantified indices
+mkdir kall-output
+cd kall-output/
+# Quantify indices
+/home/shared/kallisto/kallisto \
+  quant -i /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-index/kall-index-tross.index \
+  -o /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-output \
+  -t 40 \
+  /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/trim-fastq/*.fastq \
+  2>&1 | tee /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-output/kallisto-output.out
+  
+#Output
+#[quant] finding pseudoalignments for the reads ... done
+#[quant] processed 158,524,622 reads, 45,822,017 reads pseudoaligned
+#[quant] estimated average fragment length: 0
+#[   em] quantifying the abundances ... done
+#[   em] the Expectation-Maximization algorithm ran for 1,336 rounds
+
+```
+
+
+# create hisat2 index for trossulus transcriptome (took 25:13 min on Raven)
+```{bash}
+
+/home/shared/hisat2-2.2.1/hisat2-build \
+-f /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/data/Mtros-hq_transcripts.fasta \
+/home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/data/hisat2_index_trossulus.fa 
+# called the reference genome (scaffolds)
+
+```
+
+
+
+# Run hisat2 on trimmed reads (took 40 min on Raven)
+```{bash}
+
+mkdir hisat2_trossulus_sam/
+mkdir hisat2_trossulus_bam/
+cd /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/merged-fastq/
+
+# This script exports alignments as bam files
+# sorts the bam file because Stringtie takes a sorted file for input (--dta)
+# removes the sam file because it is no longer needed
+array=($(ls *.fastq)) # call the sequences - make an array to align
+for i in ${array[@]}; do
+       sample_name=`echo $i| awk -F [.] '{print $1}'`
+	/home/shared/hisat2-2.2.1/hisat2 \
+	  -p 48 \
+	  --dta \
+	  -x /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/data/hisat2_index_trossulus.fa \
+	  -U ${i} \
+	  -S /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/hisat2_trossulus_sam/${sample_name}.sam 
+	  
+	  /home/shared/samtools-1.12/samtools sort -@ 8 -o                /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/hisat2_trossulus_bam/${sample_name}.bam /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/hisat2_trossulus_sam/${sample_name}.sam
+    		echo "${i} bam-ified!"
+        # rm ${sample_name}.sam
+done >> hisat2out_trossulus.txt 2>&1
+
+```
+
+# check % alignment from hisat2
+```{bash}
+
+grep "overall alignment rate" /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/merged-fastq/hisat2out_trossulus.txt
+
+# average alignment rate = 34.12 +/- 2.38 sd
+
+#alignment rates:
+<!-- 87.95% overall alignment rate -->
+<!-- 87.75% overall alignment rate -->
+<!-- 77.39% overall alignment rate -->
+<!-- 85.91% overall alignment rate -->
+<!-- 85.35% overall alignment rate -->
+<!-- 77.89% overall alignment rate -->
+<!-- 87.61% overall alignment rate -->
+<!-- 85.17% overall alignment rate -->
+<!-- 76.47% overall alignment rate -->
+<!-- 88.56% overall alignment rate -->
+<!-- 86.34% overall alignment rate -->
+<!-- 77.77% overall alignment rate -->
+<!-- 88.31% overall alignment rate -->
+<!-- 86.34% overall alignment rate -->
+<!-- 72.32% overall alignment rate -->
+<!-- 87.09% overall alignment rate -->
+<!-- 83.97% overall alignment rate -->
+<!-- 70.00% overall alignment rate -->
+<!-- 87.39% overall alignment rate -->
+<!-- 87.85% overall alignment rate -->
+<!-- 78.95% overall alignment rate -->
+<!-- 86.57% overall alignment rate -->
+<!-- 84.81% overall alignment rate -->
+<!-- 76.62% overall alignment rate -->
+<!-- 85.67% overall alignment rate -->
+<!-- 85.11% overall alignment rate -->
+<!-- 77.64% overall alignment rate -->
+<!-- 85.98% overall alignment rate -->
+<!-- 85.37% overall alignment rate -->
+<!-- 77.75% overall alignment rate -->
+<!-- 86.08% overall alignment rate -->
+<!-- 83.39% overall alignment rate -->
+<!-- 75.70% overall alignment rate -->
+<!-- 86.19% overall alignment rate -->
+<!-- 85.19% overall alignment rate -->
+<!-- 79.94% overall alignment rate -->
+<!-- 81.06% overall alignment rate -->
+<!-- 72.82% overall alignment rate -->
+<!-- 81.31% overall alignment rate -->
+<!-- 71.45% overall alignment rate -->
+<!-- 82.02% overall alignment rate -->
+<!-- 69.14% overall alignment rate -->
+<!-- 77.55% overall alignment rate -->
+<!-- 74.28% overall alignment rate -->
+<!-- 80.50% overall alignment rate -->
+<!-- 75.47% overall alignment rate -->
+<!-- 73.79% overall alignment rate -->
+<!-- 71.48% overall alignment rate -->
+<!-- 81.60% overall alignment rate -->
+<!-- 73.72% overall alignment rate -->
+<!-- 77.77% overall alignment rate -->
+<!-- 75.46% overall alignment rate -->
+<!-- 80.28% overall alignment rate -->
+<!-- 74.22% overall alignment rate -->
+<!-- 78.34% overall alignment rate -->
+<!-- 70.34% overall alignment rate -->
+<!-- 85.46% overall alignment rate -->
+<!-- 67.43% overall alignment rate -->
+<!-- 79.23% overall alignment rate -->
+<!-- 71.11% overall alignment rate -->
+<!-- 69.86% overall alignment rate -->
+<!-- 82.49% overall alignment rate -->
+<!-- 74.05% overall alignment rate -->
+<!-- 79.11% overall alignment rate -->
+<!-- 75.78% overall alignment rate -->
+<!-- 83.56% overall alignment rate -->
+<!-- 69.03% overall alignment rate -->
+<!-- 79.94% overall alignment rate -->
+<!-- 76.08% overall alignment rate -->
+<!-- 79.78% overall alignment rate -->
+<!-- 73.52% overall alignment rate -->
+<!-- 81.35% overall alignment rate -->
+<!-- 63.57% overall alignment rate -->
+
+```
+
+#check alignment rate from Kallisto
+```{bash}
+grep "overall alignment rate" /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-output/
+
+eval "$(/opt/anaconda/anaconda3/bin/conda shell.bash hook)"
+conda activate
+
+multiqc /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/kall-output/
+
+#Overall alignment rate = 28.9%
+```
+
+
+# Merge with stringtie and run prepDE.py
+```{bash}
+
+ /home/shared/8TB_HDD_02/graceleuchtenberger/PSMFC-mytilus-byssus-pilot/hisat2_trossulus_bam
+
+# make gtf list file (needed for stringtie merge function)
+for filename in *.gtf; do 
+  echo $PWD/$filename; 
+  done > gtf_list.txt
+
+# make listGTF file (needed for count matrix), two columns w/ sample ID
+for filename in *.gtf; do 
+  echo $filename $PWD/$filename; 
+  done > listGTF.txt
+
+# merge GTFs into a single file
+# DO ANNOTATION BEFORE THIS STEP
+/home/shared/stringtie-2.2.1.Linux_x86_64/stringtie \
+  --merge \
+  -p 48 \
+	-G /home/shared/8TB_HDD_02/mattgeorgephd/gigas-WGBS-ploidy-desiccation/sequences/cgigas_uk_roslin_v1_mRNA.gff \
+	-o cgigas_merged.gtf gtf_list.txt #Merge GTFs to form $
+
+echo "Stringtie merge complete" $(date)
+
+# Compute accuracy of gff
+# gffcompare -r ../../../refs/Panopea-generosa-v1.0.a4.mRNA_SJG.gff3 -G -o merged Pgenerosa_merged.gtf #Compute the accuracy and pre$
+# echo "GFFcompare complete, Starting gene count matrix assembly..." $(date)
+
+# Compile gene count matrix from GTFs
+/home/shared/stringtie-2.2.1.Linux_x86_64/prepDE.py \
+  -g cgigas_gene_count_matrix.csv \
+  -i listGTF.txt #Compile the gene count matrix
+
+echo "Gene count matrix compiled." $(date)
+
+```
+
+
